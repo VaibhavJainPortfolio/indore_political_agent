@@ -1,0 +1,7 @@
+streamlit
+duckdb
+spacy
+transformers
+openai
+ag2[browser-use]
+nest_asyncio
