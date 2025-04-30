@@ -1,4 +1,5 @@
 # agents.py
+
 import os
 import re
 import duckdb
@@ -6,112 +7,76 @@ import spacy
 import openai
 from transformers import pipeline
 
-# Attempt to import DeepResearchAgent; fallback if missing
-try:
-    from autogen import LLMConfig
-    from autogen.agents.experimental import DeepResearchAgent
-    HAVE_DEEP = True
-except ImportError:
-    HAVE_DEEP = False
-
-# Helper: get OpenAI key at runtime
+# Helper to get OpenAI key
 def get_openai_key():
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
-        raise RuntimeError("OPENAI_API_KEY not set. Add it in Streamlit sidebar or secrets.")
+        raise RuntimeError("OPENAI_API_KEY not set")
     return key
 
-# Factory for DeepResearchAgent
-def make_deep_research_agent():
-    if not HAVE_DEEP:
-        raise RuntimeError("DeepResearchAgent unavailable in this environment.")
-    cfg = LLMConfig(api_type="openai", model="gpt-4o", api_key=get_openai_key())
-    return DeepResearchAgent(name="deep_research_indore", llm_config=cfg, max_web_steps=5)
-
 # Load spaCy model once
-_spacy_model = None
-def load_spacy():
-    global _spacy_model
-    if _spacy_model is None:
+_spacy = None
+def get_spacy():
+    global _spacy
+    if not _spacy:
         try:
-            _spacy_model = spacy.load("en_core_web_sm")
-        except OSError:
+            import en_core_web_sm
+            _spacy = en_core_web_sm.load()
+        except ImportError:
             spacy.cli.download("en_core_web_sm")
-            _spacy_model = spacy.load("en_core_web_sm")
-    return _spacy_model
+            _spacy = spacy.load("en_core_web_sm")
+    return _spacy
 
-nlp = load_spacy()
+nlp = get_spacy()
 sentiment_pipe = pipeline("sentiment-analysis")
 
+# We’ll ignore DeepResearch; always fallback to DB
 class DeepResearchIngestionAgent:
-    def run(self, context=None):
-        if HAVE_DEEP:
-            prompt = (
-                "Research the top social-media and news issues in Indore district "
-                "around governance, civic services, and public grievances."
-            )
-            resp = make_deep_research_agent().run({"query": prompt})
-            if hasattr(resp, 'report'):
-                return list(resp.report)
-            if hasattr(resp, 'output'):
-                return list(resp.output)
-        # Fallback: load from DuckDB
+    def run(self, ctx=None):
         from agents import load_social_db
-        return [r['text'] for r in load_social_db()]
+        return [r["text"] for r in load_social_db()]
 
 class PreProcessingAgent:
-    def run(self, records):
-        for r in records:
-            r['cleaned'] = re.sub(r'[^A-Za-z0-9\s]', '', r.get('text','')).strip()
-        return records
+    def run(self, recs):
+        for r in recs:
+            r["cleaned"] = re.sub(r"[^A-Za-z0-9\\s]", "", r["text"])
+        return recs
 
 class SentimentTrendAgent:
-    def run(self, records):
-        for r in records:
-            r['sentiment'] = sentiment_pipe(r['cleaned'])[0]['label']
-        return records
+    def run(self, recs):
+        for r in recs:
+            r["sentiment"] = sentiment_pipe(r["cleaned"])[0]["label"]
+        return recs
 
 class IssueIdentificationAgent:
-    def run(self, records):
-        return [r for r in records if r.get('sentiment')=='NEGATIVE']
+    def run(self, recs):
+        return [r for r in recs if r["sentiment"] == "NEGATIVE"]
 
 class StrategyBuilderAgent:
     def run(self, issues):
-        return [{
-            'topic':i['cleaned'],
-            'talking_point':f"Highlight government's slow response on '{i['cleaned']}' in Indore."
-        } for i in issues]
+        return [{"topic":i["cleaned"],
+                 "talking_point":f"Highlight govt’s slow response on '{i['cleaned']}'."}
+                for i in issues]
 
 class SpeechwritingAgent:
     def run(self, strategies):
-        outs=[]
+        out=[]
         for s in strategies:
-            p=f"Write a 2-3 sentence Hinglish opposition snippet for: {s['topic']}. Call-to-action."
+            p=f"Write 2-3 sentence snippet for: {s['topic']}."
             resp = openai.ChatCompletion.create(
                 model="gpt-4o",
-                messages=[{'role':'user','content':p}],
+                messages=[{"role":"user","content":p}],
                 api_key=get_openai_key()
             )
-            outs.append(resp.choices[0].message.content)
-        return outs
+            out.append(resp.choices[0].message.content)
+        return out
 
 class CrossPlatformAgent:
     def run(self, strategies):
-        posts={}
-        for s in strategies:
-            p=(f"Issue: {s['topic']}\nPoint: {s['talking_point']}\n"
-               "Generate: 1) Tweet, 2) Facebook post, 3) Instagram caption+hashtags, 4) 2-min news script.")
-            resp = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[{'role':'user','content':p}],
-                api_key=get_openai_key(), temperature=0.7
-            )
-            posts[s['topic']] = resp.choices[0].message.content
-        return posts
+        return {}   # skip on Cloud
 
-# Fallback loader
 def load_social_db(db_path="indore.db"):
-    con = duckdb.connect(db_path, read_only=True)
-    df = con.execute("SELECT text, source, ts FROM social_media").df()
+    con=duckdb.connect(db_path, read_only=True)
+    df=con.execute("SELECT text,source,ts FROM social_media").df()
     con.close()
-    return df.to_dict(orient='records')
+    return df.to_dict(orient="records")
